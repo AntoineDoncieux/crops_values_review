@@ -1,0 +1,890 @@
+---
+title: "Farmers hold diverse and connected values towards crops"
+author: "Marilou Demongeot, Antoine Doncieux, Tatiana Cardenas, Anna Porcuna-Ferrer, Yildiz Aumeeruddy-Thomas, Sophie Caillon, Jonathan Locqueville, Doyle McKey, Victoria Reyes-García, Delphine Renard"
+date: '2025-12-05'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, fig.width = 8, fig.height = 6, cache.lazy = FALSE, cache = FALSE)
+
+```
+
+
+# Packages loading
+
+```{r load_packages, include=FALSE,echo=FALSE}
+
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(tidyr)
+library(conflicted)
+library(stringr)
+library(CooccurrenceAffinity)
+library(igraph)
+library(DHARMa)
+library(sf)
+library(MASS)
+library(broom.mixed)
+library(lemon)
+library(circlize)
+
+
+## Conflicts
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+conflict_prefer("mutate", "dplyr")
+conflict_prefer("arrange", "dplyr")
+conflict_prefer("summarise", "dplyr")
+conflict_prefer("rename", "dplyr")
+conflict_prefer("degree", "igraph")
+
+# Cleaning the workspace
+rm(list=ls())
+set.seed(100)
+
+# data repository
+setwd(rstudioapi::getActiveDocumentContext()$path %>% dirname()) 
+getwd()
+```
+
+
+# Loading dataset
+
+```{r loading dataset , include=FALSE,echo=FALSE}
+
+df_articles = read_xlsx("df_crops_values_review.xlsx", sheet = "df_articles")
+
+df_crops_values = read_xlsx("df_crops_values_review.xlsx", sheet = "df_values_crops")
+
+df_tree_values = read_xlsx("df_crops_values_review.xlsx", sheet = "df_tree_of_values")
+
+df_models = read_xlsx("df_crops_values_review.xlsx", sheet = "df_models")
+
+df_drivers = read_xlsx("df_crops_values_review.xlsx", sheet = "df_externals_drivers")
+```
+
+
+# Descriptive analysis of the studies reviewed
+```{r descriptive of paper content , include=FALSE,echo=FALSE}
+
+# Number of studies reviewed
+length(unique(df_articles$Paper_ID))
+
+# Subsistance / local market ; global market (% of studies)
+market = df_articles %>%
+  filter(!integration_to_market_recode == "NA") %>%
+  group_by(integration_to_market_recode) %>% 
+  mutate(Nbr_studies = length(Paper_ID)*100/92) %>%
+  distinct(integration_to_market_recode, Nbr_studies)
+
+# Number of species 
+df_crops_values_nbr = df_crops_values %>%
+  filter(!Crop_name %in% c("NR", "NA"))
+length(unique(df_crops_values_nbr$Crop_name)) # 135 species
+
+
+# Number of cereal crops 
+df_crops_values_cereal = df_crops_values %>%
+  filter(Crop_class == "Cereals")
+length(unique(df_crops_values_cereal$Crop_name)) # 16 species
+length(unique(df_crops_values_cereal$Paper_ID)) 
+52*100/125 # 42% of studies
+
+# Proportion of articles with values attributed to each crop class (e.g., cereals, nuts)
+Tree_df = df_crops_values %>%
+  select(Paper_ID,Crop_class) %>%
+  group_by(Crop_class) %>%
+  mutate(Proportion_crops = length(unique(Paper_ID))*100/125) %>%
+  distinct(Crop_class,Proportion_crops)
+
+# Number of crops species evaluated at the varietal/landrace level
+
+df_crops_values_varietal = df_crops_values %>%
+  filter(Crop_level == "landrace/variety")
+length(unique(df_crops_values_varietal$Crop_name)) #32 varieties
+
+
+```
+
+## Mapping the studies (Figure 1)
+
+```{r map of the studies , include=FALSE,echo=FALSE}
+
+Paper_contry = df_articles %>%
+  mutate(WB_NAME  = country ) %>%
+  separate(col=WB_NAME, into = paste0("WB_NAME_sup", 1:15), sep=";") %>% 
+  select(Paper_ID, matches("WB_NAME")) %>%
+  pivot_longer(cols = c(2:16)) %>%
+  drop_na() %>%
+  rename(WB_NAME = value) %>%
+  select(Paper_ID,WB_NAME) %>%
+  mutate(WB_NAME = str_replace_all(WB_NAME, pattern=" ", repl=""), 
+         WB_NAME = recode(WB_NAME, 
+                          "USA" = "UnitedStatesofAmerica",
+                          "United-States" = "UnitedStatesofAmerica",
+                          "Coted'Ivoire" = "IvoryCoast",
+                          "ElSavador" = "ElSalvador",
+                          "Tanzania" = "UnitedRepublicofTanzania",
+                          "Congo" = "DemocraticRepublicoftheCongo",
+                          "Gana" ="Ghana",
+                          "Scotland" = "UnitedKingdom")) %>% 
+  group_by(WB_NAME) %>%
+  mutate(Nbr_etude= length(unique(Paper_ID)),
+         Reviewed = "Yes") %>%
+  distinct(WB_NAME,Nbr_etude,Reviewed) 
+
+length(Paper_contry$WB_NAME) # 67 countries within the 125 studies
+
+
+# World map 
+
+sf_World_plot <- st_read("ne_110m_admin_0_sovereignty.shp", stringsAsFactors = FALSE) %>%
+  select(SOVEREIGNT, CONTINENT) %>%
+  rename(WB_NAME = SOVEREIGNT) %>%
+  st_transform("ESRI:54030") %>% # Robinson projection
+  mutate(WB_NAME = str_replace_all(WB_NAME, pattern=" ", repl="")) 
+
+# Calcule le centre des pays ou y'a eu des publis
+sf_World_final = sf_World_plot %>%
+  full_join(Paper_contry)%>% 
+  st_transform("ESRI:54030") %>%
+  mutate(Centroid = st_centroid(geometry)) %>%
+  mutate(x = as.numeric(st_coordinates(Centroid)[,1]),
+         y = as.numeric(st_coordinates(Centroid)[,2])) %>% 
+  st_as_sf(coords = c("x", "y"), st_crs("ESRI:54030"), remove=TRUE) %>% # Robinson projection
+  filter(Reviewed == "Yes") %>%
+  as.data.frame()
+
+
+# Map
+ggplot(data = sf_World_plot) +
+  geom_sf(color = "darkgray", fill = "lightgray") +
+  coord_sf(crs = "+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 
+            +datum=WGS84 +units=m +no_defs", expand = F) +
+  theme_bw() +
+  theme(panel.grid.major = element_line(color = 'white', 
+                                        size = 0, 
+                                        linetype = "solid"),
+        panel.border = element_blank(),
+        panel.background = element_rect(fill = 'white'),
+        legend.position = "none") + 
+  geom_point(aes(x=x,y=y),sf_World_final,size=sf_World_final$Nbr_etude/3,alpha=0.8,colour="black") +
+  xlab("") + ylab("")
+
+
+
+```
+
+
+# Proportion of values within each domain and levels
+
+```{r Values proportion , include=FALSE,echo=FALSE}
+
+# Proportion of values per domain 
+
+df_crops_values_prop = df_crops_values %>%
+  group_by(Domain) %>%
+  mutate(Number_of_domain_value = length(Level_1)) %>%
+  distinct(Number_of_domain_value,Domain ) %>%
+  mutate(Number_of_domain_value_prop = Number_of_domain_value*100/1716)
+
+
+### Domain 3. Rural economy
+
+##### Level 1 #####
+df_crops_values_prop_economy = df_crops_values %>%
+  filter(Domain == "3. Socio-economic") %>%
+  group_by(Level_1) %>%
+  mutate(Number_of_L1_value = length(Level_1)) %>%
+  distinct(Number_of_L1_value,Level_1 ) %>%
+  mutate(Number_of_L1_value_prop = Number_of_L1_value*100/741)
+
+#### Level 2 ####
+df_crops_values_prop_economy_L2 = df_crops_values %>%
+  filter(Domain == "3. Socio-economic") %>%
+  group_by(Level_2) %>%
+  mutate(Number_of_L2_value = length(Level_2)) %>%
+  distinct(Number_of_L2_value,Level_2 ) %>%
+  mutate(Number_of_L2_value_prop = Number_of_L2_value*100/741)
+
+
+### Domain 6. Agroecological traits  
+
+##### Level 1 #####
+
+df_crops_values_prop_AT = df_crops_values %>%
+  filter(Domain == "6. Agroecological traits") %>%
+  group_by(Level_1) %>%
+  mutate(Number_of_L1_value = length(Level_1)) %>%
+  distinct(Number_of_L1_value,Level_1 ) %>%
+  mutate(Number_of_L1_value_prop = Number_of_L1_value*100/442)
+
+#### Level 2 ####
+df_crops_values_propagroeco_L2 = df_crops_values %>%
+  filter(Domain == "6. Agroecological traits") %>%
+  group_by(Level_2) %>%
+  mutate(Number_of_L2_value = length(Level_2)) %>%
+  distinct(Number_of_L2_value,Level_2 ) %>%
+  mutate(Number_of_L2_value_prop = Number_of_L2_value*100/442)
+
+
+```
+
+
+## Values as priority
+
+```{r Values priority  , include=FALSE,echo=FALSE}
+
+paper_priority = df_crops_values %>%
+  filter(!Ranking =="NA")
+length(unique(paper_priority$Paper_ID)) # 61*100/125 = 49%
+
+  
+values_priority = df_crops_values %>%
+  filter(!Ranking =="NA") %>%
+    filter(Ranking %in% c("most important", "important")) %>%
+  mutate(Ranking_important = recode(Ranking,
+                                   "most important" = "priority",
+                                   "important" = "priority")) %>%
+  distinct(Level_1, Paper_ID, Ranking_important) %>%
+  group_by(Level_1, Ranking_important) %>%
+  mutate(values_priority = length(unique(Paper_ID))) %>%
+  distinct(Ranking_important,values_priority) 
+
+34*100/61  # 56% of 3.3. yield were mentionned as a priority
+31*100/61 # 51% of 3.2 monetary value were mentionned as a priority
+
+print(" we recoded the ranking 'most important' and 'important' as one unique category to overcome the multiple citations of values per crops and papers")
+
+
+values_priority = df_crops_values %>%
+  filter(!Ranking =="NA") %>%
+    filter(Ranking %in% c("most important", "important")) %>%
+  mutate(Ranking_important = recode(Ranking,
+                                   "most important" = "priority",
+                                   "important" = "priority")) %>%
+  distinct(Level_1, Paper_ID, Ranking_important) %>%
+  group_by(Level_1, Ranking_important) %>%
+  mutate(values_priority = length(unique(Paper_ID))) %>%
+  distinct(Ranking_important,values_priority) 
+
+
+values_priority_domain = df_crops_values %>%
+  filter(!Ranking =="NA") %>%
+    #filter(Ranking %in% c("most important", "important")) %>%
+ # mutate(Ranking_important = recode(Ranking,
+                                   #"most important" = "priority",
+                                  # "important" = "priority")) %>%
+  group_by(Domain) %>%
+  mutate(Nbr_value = length(Level_1)) %>%
+  distinct(Domain, Nbr_value)
+  
+# 104 citations of values for D2, 
+
+# Important domain of values within the paper ranked as priority / important
+values_priority_domain_2 = df_crops_values %>%
+  filter(!Ranking =="NA") %>%
+    filter(Ranking %in% c("most important", "important")) %>%
+ mutate(Ranking_important = recode(Ranking,
+                                   "most important" = "priority",
+                                   "important" = "priority")) %>%
+  group_by(Domain) %>%
+  mutate(Nbr_value = length(Level_1)) %>%
+  distinct(Domain, Nbr_value)
+
+57*100/89 # 64% of values of Domain 2 (Cultural preferences) were ranked as priority
+
+```
+
+## Values associated with specific crops 
+
+```{r Values specific crops , include=FALSE,echo=FALSE}
+
+rice_values = df_crops_values %>%
+  filter(Crop_name == "Oryza sativa") %>%
+  group_by(Level_1) %>%
+  mutate(Rice_values_L1 = length(Level_1)) %>%
+  distinct(Level_1,Rice_values_L1)
+
+
+Crop_value_cultural_pref_domain = df_crops_values %>%
+  filter(Domain == "2. Cultural preferences") %>%
+  group_by(Crop_name) %>%
+  mutate(Crop_number = length(Crop_name)) %>%
+    filter(Crop_name == "Manihot esculenta") 
+  
+  
+cassava_value = df_crops_values %>%
+  filter(Crop_name == "Manihot esculenta") %>%
+  group_by(Level_1) %>%
+  mutate(Rice_values_L1 = length(Level_1)) %>%
+  distinct(Level_1,Rice_values_L1) %>%
+  mutate(Per_Rice_values_L1 = Rice_values_L1*100/136)
+
+
+```
+
+
+# Co-occurence network of values 
+
+## Building dataset: crop level
+
+```{r dataset network , include=FALSE,echo=FALSE}
+
+# Meand and SD number of values per studies
+df_values_occurence_number = df_crops_values %>%
+  select(Paper_ID, Level_1) %>%
+  group_by(Paper_ID) %>%
+  mutate(Nbr_value= length(Level_1)) %>%
+  distinct(Paper_ID,Nbr_value )
+mean(df_values_occurence_number$Nbr_value)
+sd(df_values_occurence_number$Nbr_value)
+
+## Number of domain per paper 
+df_values_occurence_number = df_crops_values %>%
+    mutate(Level_1_domain_number = str_extract(Level_2, "^\\d+") %>% paste0(".")) %>%
+  group_by(Paper_ID) %>%
+  mutate(Nbr_Domain = length(unique(Level_1_domain_number))) %>%
+  distinct(Paper_ID, Nbr_Domain)
+12*100/125 # 10% of rerported a single domain 
+
+
+# Creating the network
+df_values_occurence = df_crops_values %>%
+  distinct(Code_U, Level_1) %>%
+  mutate(Occurence = 1) %>%
+    pivot_wider(names_from = Code_U, values_from = Occurence,values_fill = 0)
+
+mat_values_occurence = as.matrix(df_values_occurence)
+namesmat=mat_values_occurence[,1]
+mat_values_occurence=mat_values_occurence[,-1]
+
+mat_values_occurence=apply(mat_values_occurence, MARGIN = 2, FUN = as.numeric)
+
+row.names(mat_values_occurence)=namesmat
+
+ordering <- sort(rownames(mat_values_occurence))
+
+
+# Cumpting the p-value and alpha for each co-occurence of values per article
+df_occurence_value <- affinity(data = mat_values_occurence[ordering,], row.or.col = "row", squarematrix = c("all")) 
+
+
+# Filtering significant association of values 
+
+df_values_occurence_subset = df_occurence_value$all %>%
+  select(entity_1, entity_2,obs_cooccur_X,p_value,alpha_mle) %>%
+  mutate(p_value = as.numeric(p_value),
+         p_value = format(p_value, scientific = FALSE),
+         alpha_mle=as.numeric(alpha_mle)) %>%
+   filter(p_value<=0.05 & alpha_mle > 0) %>%
+  mutate(values_A_Domain = str_extract(entity_1, "\\d") %>%
+  paste0("."),
+         values_B_Domain = str_extract(entity_2, "\\d") %>%
+  paste0("."),
+         values_A_number = str_extract(entity_1, "^\\d+(?:\\.\\d+)?(?=\\.)") %>%
+  paste0("."),
+   values_B_number = str_extract(entity_2, "^\\d+(?:\\.\\d+)?(?=\\.)") %>%
+  paste0(".")) 
+
+```
+
+## Degree centrality: crop level
+
+```{r values network centrality , include=FALSE,echo=FALSE}
+
+df_nodes = df_values_occurence_subset %>%
+  select(entity_1,entity_2) %>%
+  pivot_longer(c(1:2)) %>%
+  distinct(value) %>%
+  rename(Level_1 = value) %>%
+  left_join(df_tree_values , "Level_1") %>%
+  distinct(Level_1, .keep_all=T) %>%
+  mutate(Domain = str_extract(Level_1, "\\d") %>%
+  paste0("."),
+         Level_1_number = str_extract(Level_1, "^\\d+(?:\\.\\d+)?(?=\\.)") %>%
+  paste0(".")) %>%
+  select(Level_1_number,Domain, Level_1)
+
+net <- graph_from_data_frame(d=df_values_occurence_subset[,8:9], vertices=df_nodes, directed = F)
+
+values_degree = degree(net) %>% as.data.frame()
+
+
+# Drawing Fig. S2
+
+pal.nodes = c("#506F80", "#456234", "#F06666","#B05726",  "#C6B3D7", "#FEC990")
+              
+              
+
+vertexCol <- igraph::vertex_attr(net, "Domain")
+
+vertexCol[vertexCol == "1."] = pal.nodes
+vertexCol[vertexCol == "2."] = pal.nodes[2]
+vertexCol[vertexCol == "3."] = pal.nodes[3] 
+vertexCol[vertexCol == "4."] = pal.nodes[5]
+vertexCol[vertexCol == "5."] = pal.nodes[4]
+vertexCol[vertexCol == "6."] = pal.nodes[6]
+
+plot(net, vertex.color=vertexCol, 
+     edge.size=8, vertex.size = degree(net),
+     edge.color = "black", vertex.label.color="black",
+     vertex.label.dist=-1,asp=1, rescale=T)
+
+```
+
+
+
+## Chord diagram showing the co-occurence of values (Fig.3)
+
+
+```{r chord diagram , include=FALSE,echo=FALSE}
+
+df_values_occurence_domain = df_values_occurence_subset %>%
+  select(entity_1, entity_2, obs_cooccur_X) %>%
+  mutate(entity_1_number = str_extract(entity_1, "^\\d+") %>% paste0("."),
+         entity_2_number = str_extract(entity_2, "^\\d+") %>% paste0("."),
+         entity_3 = paste0(entity_1_number, "_",entity_2_number ),
+         N_total_occ = sum(obs_cooccur_X)) %>%
+  select(entity_3,obs_cooccur_X, N_total_occ) %>%
+  group_by(entity_3) %>%
+  mutate(Nbr_domain_occ = sum(obs_cooccur_X)) %>%
+  distinct(entity_3,Nbr_domain_occ,N_total_occ)
+151*100/628 # 24% 
+
+print("Within the Agroecological traits domain , about a quarter of co-occurrences (24%) involved values within the same domain ")
+
+### Chord diagram: level of domain
+
+df_values_occurence_domain = df_values_occurence_subset %>%
+  select(entity_1, entity_2, obs_cooccur_X) %>%
+  mutate(entity_1_number = str_extract(entity_1, "^\\d+") %>% paste0("."),
+         entity_2_number = str_extract(entity_2, "^\\d+") %>% paste0("."),
+         N_total_occ = sum(obs_cooccur_X)) %>%
+  group_by(entity_1_number,entity_2_number) %>%
+  mutate(Nbr_domain_occ = sum(obs_cooccur_X)) %>%
+  distinct(entity_1_number,entity_2_number,Nbr_domain_occ,N_total_occ) %>%
+  select(-N_total_occ)
+
+chordDiagram(df_values_occurence_domain, annotationTrack = c("grid", "name"))
+
+
+```
+
+
+# Values and integration to market (subsistance vs global market)
+
+
+```{r integration to market , include=FALSE,echo=FALSE}
+
+df_market_integration = df_articles %>%
+  select(Paper_ID, integration_to_market_recode) 
+
+
+## Mean number of values per type of market integration
+
+df_crops_values_market = df_crops_values %>%
+    full_join(df_market_integration, "Paper_ID") %>%
+  drop_na(integration_to_market_recode) %>%
+  group_by(Paper_ID) %>%
+  mutate(Nbr_values = length(Level_1)) %>%
+  distinct(Paper_ID,Nbr_values,integration_to_market_recode) %>%
+  group_by(integration_to_market_recode) %>%
+  mutate(Mean_value = mean(Nbr_values),
+         SD_value = sd(Nbr_values)) %>%
+  distinct(integration_to_market_recode,Mean_value,SD_value)
+
+# Domain level 
+df_crops_values_market_d = df_crops_values %>%
+    full_join(df_market_integration, "Paper_ID") %>%
+  drop_na(integration_to_market_recode) %>%
+  group_by(integration_to_market_recode) %>%
+  mutate(Nbr_value_T = length(Domain)) %>%
+  group_by(Domain,integration_to_market_recode) %>%
+  mutate(Nbr_value_d = length(Domain),
+         Per_value_d = Nbr_value_d*100/Nbr_value_T) %>%
+  distinct(integration_to_market_recode, Domain, Nbr_value_T,Nbr_value_d, Per_value_d )
+
+# level 1 
+df_crops_values_market_l = df_crops_values %>%
+    full_join(df_market_integration, "Paper_ID") %>%
+  drop_na(integration_to_market_recode) %>%
+  group_by(Level_1,integration_to_market_recode) %>%
+  mutate(Nbr_value_l = length(Level_1)) %>%
+  distinct(integration_to_market_recode, Level_1, Nbr_value_l)
+
+# level 2
+df_crops_values_market_l2 = df_crops_values %>%
+    full_join(df_market_integration, "Paper_ID") %>%
+  drop_na(integration_to_market_recode) %>%
+  group_by(Level_2,integration_to_market_recode) %>%
+  mutate(Nbr_value_l = length(Level_2)) %>%
+  distinct(integration_to_market_recode, Level_2, Nbr_value_l)
+
+```
+
+
+# Values and type of crops (perennial vs annual)
+
+```{r crop types , include=FALSE,echo=FALSE}
+
+## Perennial vs annual (% of values reported)
+
+type_crops_values = df_crops_values %>%
+  mutate(Nbr_values = length(Level_1)) %>%
+  group_by(Crop_type) %>%
+  mutate(Nbr_values_crop = length(Level_1)*100/Nbr_values ) %>%
+  distinct(Nbr_values_crop,Nbr_values)
+
+# level domain and level 2
+type_crops_values_detail = df_crops_values %>%
+    group_by(Crop_type, Domain) %>%
+  mutate(Nbr_values_crop = length(Domain )) %>%
+  group_by(Crop_type, Domain,Level_1) %>%
+    mutate(Nbr_values_crop_2 = length(Level_1 )) %>%
+  distinct(Crop_type,Level_1,Domain, Nbr_values_crop,Nbr_values_crop_2)
+
+
+# Level 2
+type_crops_values_detail_2 = df_crops_values %>%
+    group_by(Crop_type, Level_2) %>%
+  mutate(Nbr_values_crop = length(Level_2 )) %>%
+  distinct(Crop_type,Level_2,Nbr_values_crop)
+```
+
+# Values and crop uses (food vs non-food crops)
+
+```{r crop use , include=FALSE,echo=FALSE}
+
+### number of species
+
+food_crop = df_crops_values %>%
+  filter(!food_crops %in% c("NR", "NA")) %>%
+  group_by(food_crops) %>%
+  mutate(Nb_crop = length(unique(Crop_name))) %>%
+  distinct(food_crops,Nb_crop)
+ 
+# Level domain 
+usage_crops_values_domain = df_crops_values %>%
+    filter(!food_crops %in% c("NR", "NA")) %>%
+  drop_na(food_crops) %>%
+    group_by(food_crops) %>%
+  mutate(Nbr_value_D = length(Domain)) %>%
+  group_by(food_crops, Domain) %>%
+  mutate(Nbr_values = length(Domain )*100/Nbr_value_D ) %>%
+  distinct(food_crops,Domain, Nbr_values)
+
+
+
+```
+
+
+# Values and crop role (staple vs cash crops)
+```{r crop role , include=FALSE,echo=FALSE}
+
+### number of species 
+
+Role_crops_number = df_crops_values %>%
+  filter(Crop_role_2 %in% c("cash", "staple")) %>%
+  group_by(Crop_role_2) %>%
+  mutate(Nbr_crops = length(unique(Crop_name))) %>%
+  distinct(Crop_role_2,Nbr_crops) %>%
+  mutate(Nbr_crops_T = 135,
+         Per_crops = Nbr_crops*100/Nbr_crops_T)
+
+# Level domain 
+role_crops_values_domain = df_crops_values %>%
+    group_by(Crop_role_2) %>%
+  mutate(Nbr_value_D = length(Domain)) %>%
+  group_by(Crop_role_2, Domain) %>%
+  mutate(Nbr_values = length(Domain )*100/Nbr_value_D ) %>%
+  distinct(Crop_role_2,Domain, Nbr_values)
+
+# Level 1
+role_crops_values= df_crops_values %>%
+  mutate(Nbr_values = length(Level_1)) %>%
+  group_by(Crop_role_2) %>%
+  mutate(Nbr_values = length(Nbr_values)*100/Nbr_values ) %>%
+  distinct(Crop_role_2,Nbr_values)
+
+
+
+role_crops_values_2_level_1 = df_crops_values %>%
+    group_by(Crop_role_2,Domain) %>%
+  mutate(Nbr_value_D = length(Level_1)) %>%
+  group_by(Crop_role_2, Level_1) %>%
+  mutate(Nbr_values = length(Level_1 )) %>%
+  distinct(Crop_role_2,Level_1,Domain, Nbr_value_D,Nbr_values)
+```
+
+
+# Values within agroecosystems
+
+```{r agroecosystem , include=FALSE,echo=FALSE}
+
+# Number of studies 
+
+df_agroecosystem_nb_studies = df_crops_values %>%
+  filter(Crop_level == "agroecosystem") %>%
+  mutate(Nbr_studies = length(unique(Paper_ID)),
+         Per_studies = Nbr_studies*100/125) %>%
+  distinct(Crop_level,Nbr_studies,Per_studies)
+
+
+
+df_agroecosystem = df_crops_values %>%
+  filter(Crop_level == "agroecosystem") %>%
+  group_by(Domain) %>%
+  mutate(Nbr_values = length(Domain)) %>%
+    group_by(Domain, Level_1) %>%
+    mutate(Nbr_values_l = length(Level_1)) %>%
+  distinct(Domain,Nbr_values, Level_1,Nbr_values_l )
+
+```
+
+
+
+# Modelisation (negative binomial glm)
+
+```{r models , include=FALSE,echo=FALSE}
+
+## df coders ### 
+
+df_coders = df_articles %>%
+  distinct(Paper_ID, coder)
+
+## Models df ##
+df_models = df_models %>%
+  left_join(df_coders, "Paper_ID") %>%
+  mutate(main_topic = as.factor(main_topic),
+         coder = as.factor(coder),
+         value_centred = as.factor(value_centred), 
+         rsch_area_gnl = as.factor(rsch_area_gnl),
+         Nbr_thinnest_value = as.numeric(Nbr_thinnest_value),
+         Nbr_valued_crops = as.numeric(Nbr_valued_crops)) 
+
+hist(df_models$Nbr_thinnest_value)
+colSums(is.na(df_models))
+
+### Coders effect ###
+
+mod <- lm(Nbr_thinnest_value ~ Nbr_valued_crops * coder, data = df_models)
+summary(mod)
+
+
+### Model 1: glm 
+
+m1 = glm(Nbr_thinnest_value ~  Nbr_valued_crops + 
+                     main_topic + value_centred + rsch_area_gnl ,
+                 data=df_models, family = "poisson")
+
+summary(m1)
+
+#### Check for models output
+
+testDispersion(m1)
+simulationOutput <- simulateResiduals(fittedModel = m1, plot = F)
+plot(simulationOutput)
+
+print("Overdispertion of the residuals => negative binomial glm")
+
+
+#### Model 2: negative binomial glm
+
+
+m2 = glm.nb(Nbr_thinnest_value ~   scale(Nbr_valued_crops) + 
+                    relevel(main_topic, ref="practice adopt_aband") +
+              relevel(value_centred, ref="No") + 
+              relevel(rsch_area_gnl, ref="Social sciences"),
+                 data=df_models)
+
+summary(m2)
+car::Anova(m2, type=2) # because the data is unbalanced
+testDispersion(m2) 
+simulationOutput_m2 <- simulateResiduals(fittedModel = m2, plot = F)
+plot(simulationOutput_m2) 
+
+# Confidence interval
+confint(m2)
+
+
+
+## Drawing the plots 
+
+
+#### Estimate et CI ####
+
+df_mod_values <- broom.mixed::tidy(m2, conf.int = TRUE, effects = c("fixed", "ran_pars"))
+
+Variable_name <- data.frame(
+  term = rep(c("A", "B", "C"), 1),
+  estimate = rep(0, 1),
+  std.error = rep(0, 1),
+  statistic = rep(0, 1),
+  p.value = rep(0, 1),
+  conf.low = rep(0, 1),
+  conf.high = rep(0, 1)
+)
+
+df_mod_values = rbind(df_mod_values,Variable_name)
+
+df_mod_final_betas = df_mod_values %>%
+  filter(!term %in% c("(Intercept)","sd__(Intercept)", "sd__Observation" )) %>%
+  mutate(Variable = recode(term,
+                           "scale(Nbr_valued_crops)" = "Number of valued crops",
+                             "relevel(main_topic, ref = \"practice adopt_aband\")climate change and adatation" = "Climate change and adaptation", 
+                             "relevel(main_topic, ref = \"practice adopt_aband\")drivers of crop choices" = "Drivers of crop choices",
+                             "relevel(main_topic, ref = \"practice adopt_aband\")local crop or diversity" = "Local crop or diversity", 
+                             "relevel(main_topic, ref = \"practice adopt_aband\")participatory breeding & crop adoption" = "Participatory breeding & crop adoption",
+                             "relevel(value_centred, ref = \"No\")Yes" = "Yes", 
+                             "relevel(rsch_area_gnl, ref = \"Social sciences\")Agriculture sc. & tech." = "Agriculture sc. & tech.",
+                             "relevel(rsch_area_gnl, ref = \"Social sciences\")Environment & ecology" = "Environment & ecology",
+                           "A" = "Main topic (base: Adoption or abandonment of practices)",
+                           "B" = "Values centred (base: No)",
+                           "C" = "Research area (base: Social Sciences)"
+                           ),
+         p.value_round = round(p.value, 2),
+         Color_significance = case_when(p.value_round <= 0.05 ~ "Significant", TRUE  ~ "No_ignificant"))
+
+
+# Ordering the variables
+df_mod_final_betas$Order_type_variable = factor(df_mod_final_betas$Variable,
+                                                levels=rev(c("Number of valued crops",
+                                                             "Main topic (base: Adoption or abandonment of practices)",
+                                                             "Climate change and adaptation",
+                                                             "Drivers of crop choices",
+                                                             "Local crop or diversity",
+                                                             "Participatory breeding & crop adoption",
+                                                             "Values centred (base: No)",
+                                                             "Yes",
+                                                             "Research area (base: Social Sciences)",
+                                                             "Agriculture sc. & tech.",
+                                                             "Environment & ecology")))
+
+
+ggplot(df_mod_final_betas, aes(x = estimate, y = Order_type_variable, colour=Color_significance)) +
+  geom_vline(xintercept = 0, color = "black") +
+  geom_point(size = 2.3) +
+  geom_errorbar(aes(xmin = conf.low, xmax = conf.high), width = 0, size = 0.8) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  xlab("Standardized regression coefficient") +
+  ylab("")  + theme(panel.grid.major = element_blank(), # remove the major lines
+                                                                                             panel.grid.minor = element_blank(),
+                                                                                             panel.spacing.x = unit(1.1, "lines"),
+                                                                                             strip.background.y = element_blank(),
+                                                                                             strip.text.y = element_blank(),
+                                                                                             strip.background.x = element_rect(colour="black", fill="white", 
+                                                                                                                               size=1, linetype="solid"),
+                                                                                             strip.text.x = element_text(size=10),
+                                                                                             strip.placement = "outside") + 
+  scale_color_manual(values=c("gray80", "black"))
+
+print("The figure was edited using Inkscape to improve its visual quality")
+
+```
+
+# Academic field and values
+
+```{r values research area , include=FALSE,echo=FALSE}
+
+Research_Area = df_articles %>%
+  select(Paper_ID,Rsch_area_gnl )
+
+
+Research_area_Value = df_crops_values %>%
+  full_join(Research_Area, "Paper_ID") %>%
+  group_by(Rsch_area_gnl) %>%
+  mutate(Nbr_vlue_T = length(Paper_ID)) %>%
+  group_by(Rsch_area_gnl, Domain) %>%
+  mutate(Nbr_value_Domain = length(Paper_ID)/Nbr_vlue_T,
+         Per_value_Domain = length(Paper_ID)*100/Nbr_vlue_T) %>%
+  distinct(Rsch_area_gnl, Nbr_vlue_T,Nbr_value_Domain,Per_value_Domain)
+
+color_domain <-  c("#506F80", "#456234", "#F06666","#B05726",  "#C6B3D7", "#FEC990") ; names(color_domain) <- c("1. Social and symbolic",
+                                                                                                   "2. Cultural preferences",
+                                                                                                   "3. Socio-economic",
+                                                                                                   "5. Maintenance of options",
+                                                                                                   "6. Agroecological traits",
+                                                                                                   "4. Ecological interactions")
+
+color_domain <- alpha(color_domain, 0.7)
+
+Research_area_Value$Order_type = factor(Research_area_Value$Domain, levels=c("1. Social and symbolic","2. Cultural preferences",
+                                                                         "3. Socio-economic","4. Ecological interactions","5. Maintenance of options","6. Agroecological traits" ))
+
+ggplot(Research_area_Value, aes(fill=Order_type, y=Nbr_value_Domain, x=Rsch_area_gnl)) + 
+    geom_bar(position="stack", stat="identity")+ scale_fill_manual(values=color_domain) + theme_bw() + 
+  xlab("Research areas") + ylab("Proportion of values (%)") + scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  scale_x_discrete(labels=c("Agriculture sc. & tech. \n (n= 1,036) ", "Environment & ecology \n (n= 505)", "Social sciences \n (n= 175)")) + 
+  guides(fill=guide_legend(title="Domains:")) + theme_bw() + theme(panel.grid.major = element_blank(), # remove the major lines
+                                                          panel.grid.minor = element_blank(),
+                                                          legend.position = "right",
+                                                          strip.text.y = element_blank(),
+                                                          strip.background.x = element_rect(colour="black", fill="white", 
+                                                                                            size=1, linetype="solid"),
+                                                          strip.text.x = element_text(size=10),
+                                                          strip.placement = "outside")
+
+
+## Exact's fisher test
+
+fischer_t = df_crops_values %>%
+  full_join(Research_Area, "Paper_ID") %>%
+  group_by(Rsch_area_gnl) %>%
+  mutate(Nbr_vlue_T = length(Paper_ID)) %>%
+  group_by(Rsch_area_gnl, Domain) %>%
+  mutate(Nbr_value_Domain = length(Paper_ID)/Nbr_vlue_T)
+
+
+dput(unique(Research_Area$Rsch_area_gnl))
+contingency_table <- table(fischer_t$Rsch_area_gnl, fischer_t$Domain)
+contingency_table
+
+PropLig=prop.table(contingency_table,margin=1)
+PropLig
+
+
+fisher.test(contingency_table,hybrid = TRUE)
+
+
+```
+
+
+
+# Drivers of crops change 
+
+```{r Drivers , include=FALSE,echo=FALSE}
+
+# Percent of studies 
+
+df_drivers_full1 = df_drivers %>%
+  filter(!Drivers == "NA") 
+length(unique(df_drivers_full1$Paper_ID))
+99*100/125 
+
+# Proportion of drivers 
+df_drivers_full <- df_drivers %>%
+  filter(!Drivers == "NA") %>%
+  group_by(Drivers) %>%
+  mutate(freq = length(unique(Paper_ID))) %>%
+  filter(!freq == 1 ) %>%
+  mutate(sum = 99) %>% 
+  mutate(percent= freq*100/sum) %>%
+  as.data.frame() %>%
+  droplevels() %>% 
+  distinct(Drivers, percent) 
+
+
+ggplot(df_drivers_full, aes(reorder(x= Drivers, -percent), y=percent )) +
+  geom_bar(stat="identity", fill="black") + coord_flip() + theme_bw() + theme(panel.grid.major = element_blank(), # remove the major lines
+                                                   panel.grid.minor = element_blank(),
+                                                   legend.position = "none") + 
+  xlab("") + ylab("Proportion of articles (%)")
+```
+
+
